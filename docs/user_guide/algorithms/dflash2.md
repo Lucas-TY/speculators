@@ -31,6 +31,22 @@ The public DFlash2 implementation specifies inference but does not publish its t
 
 `--selector-loss-alpha` controls the second term. Both terms use the configured fixed exponential or D-PACE position weighting. The selector is never trained against a full-vocabulary corrected distribution, matching the candidate set it can rerank at serving time.
 
+### D-PARD
+
+D-PARD replaces the unary objective with Rényi-half divergence while keeping the selector's categorical cross-entropy. Its local acceptance is computed from the selector-corrected distribution over the strict unary top-K candidate set:
+
+```text
+acceptance = sum_candidate min(target_probability, selector_probability)
+```
+
+The detached acceptance values produce the same smoothed suffix-survival weights used by D-PACE. Unary and selector losses share those weights and are each reduced by the number of valid positions. Enable the objective with:
+
+```bash
+--loss-fn renyi_half \
+--per-position-loss-weight dpard \
+--dpard-alpha 0.5
+```
+
 Validation reports clearly separated unary candidate recall and target mass, teacher-forced selector accuracy, and an actual greedy self-conditioned path. The path begins at the verified anchor and feeds each selected token to the next edge score. Its per-position accuracy is conditioned on the earlier path being correct. The accepted-length metrics include the verified anchor and report both the realized selector path and the oracle unary-top-K path.
 
 DFlash2 currently requires the full verifier vocabulary. Pruned draft vocabularies are rejected because current serving implementations select candidates before any draft-to-target vocabulary mapping.
@@ -46,10 +62,11 @@ This experimental implementation directly trains full-vocabulary predecessor and
 | `--selector-rank`       |     256 | Rank of the transition factorization     |
 | `--selector-top-k`      |      16 | Unary candidates reranked per position   |
 | `--selector-loss-alpha` |     1.0 | Weight of the selector K-way CE term     |
+| `--dpard-alpha`         |     0.5 | D-PARD acceptance smoothing constant     |
 
 All [DFlash](dflash.md) backbone parameters also apply. DFlash2 defaults to five draft layers, block size 8, `sample_from_anchor: False`, fixed exponential position weighting, and KL divergence loss. Set all shared knobs explicitly when comparing it with another algorithm.
 
-To train your own, see `examples/train/dflash2_qwen3_8b_ultrachat_online_5k.sh`.
+To train your own, see `examples/train/dflash2_qwen3_8b_ultrachat_online_5k.sh`. For a compact Qwen3-4B D-PARD command, see `examples/train/dflash2_qwen3_4b_dpard.sh`.
 
 ## Serving
 

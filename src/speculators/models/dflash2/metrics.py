@@ -11,7 +11,9 @@ from speculators.losses import (
     LossConfig,
     dflash_loss_decay,
     dpace_loss_decay,
+    dpard_loss_decay,
     loss_function,
+    masked_weighted_mean,
     tv_loss,
 )
 from speculators.models.dspark.metrics import compute_metrics as compute_unary_metrics
@@ -125,32 +127,70 @@ def compute_metrics(
     selector_loss_alpha: float = 1.0,
     per_position_loss_weight: str = "fixed-exp-decay",
     dpace_alpha: float = 0.5,
+    dpard_alpha: float = 0.5,
+    runtime_candidate_ids: torch.Tensor | None = None,
+    runtime_candidate_logits: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Combine the unary DFlash objective with a K-way selector objective."""
-    unary_loss, metrics = compute_unary_metrics(
-        unary_logits,
-        targets,
-        None,
-        loss_mask,
-        block_size,
-        loss_config=loss_config,
-        tv_loss_fn=tv_loss_fn,
-        gamma=gamma,
-        confidence_head_alpha=0.0,
-        per_position_loss_weight=per_position_loss_weight,
-        dpace_alpha=dpace_alpha,
-        sample_from_anchor=sample_from_anchor,
-    )
-    selector_loss = compute_selector_loss(
-        candidate_logits,
-        target_positions,
-        loss_mask,
-        block_size,
-        gamma=gamma,
-        per_position_loss_weight=per_position_loss_weight,
-        dpace_alpha=dpace_alpha,
-        sample_from_anchor=sample_from_anchor,
-    )
+    metrics: dict[str, Any]
+    dpard_acceptance = None
+    dpard_credit = None
+    if per_position_loss_weight == "dpard":
+        if set(loss_config) != {"renyi_half"}:
+            raise ValueError("D-PARD requires exactly loss_fn=renyi_half")
+        if runtime_candidate_ids is None or runtime_candidate_logits is None:
+            raise ValueError("D-PARD requires runtime candidate IDs and logits")
+        actor_fn, coefficient = loss_config["renyi_half"]
+        if coefficient != 1.0:
+            raise ValueError("D-PARD requires unit Renyi-half coefficient")
+        with torch.no_grad():
+            target_prob = torch.softmax(targets.float(), dim=-1)
+            candidate_target_prob = target_prob.gather(-1, runtime_candidate_ids)
+            proposal_prob = torch.softmax(runtime_candidate_logits.float(), dim=-1)
+            dpard_acceptance = torch.minimum(candidate_target_prob, proposal_prob).sum(
+                dim=-1
+            )
+            dpard_credit = dpard_loss_decay(
+                dpard_acceptance,
+                loss_mask,
+                block_size,
+                dpard_alpha,
+                start_pos=0 if sample_from_anchor else 1,
+            )
+        unary_loss = masked_weighted_mean(
+            actor_fn(unary_logits, targets), dpard_credit, loss_mask
+        )
+        selector_loss = masked_weighted_mean(
+            _candidate_cross_entropy(candidate_logits, target_positions),
+            dpard_credit,
+            loss_mask,
+        )
+        metrics = {}
+    else:
+        unary_loss, metrics = compute_unary_metrics(
+            unary_logits,
+            targets,
+            None,
+            loss_mask,
+            block_size,
+            loss_config=loss_config,
+            tv_loss_fn=tv_loss_fn,
+            gamma=gamma,
+            confidence_head_alpha=0.0,
+            per_position_loss_weight=per_position_loss_weight,
+            dpace_alpha=dpace_alpha,
+            sample_from_anchor=sample_from_anchor,
+        )
+        selector_loss = compute_selector_loss(
+            candidate_logits,
+            target_positions,
+            loss_mask,
+            block_size,
+            gamma=gamma,
+            per_position_loss_weight=per_position_loss_weight,
+            dpace_alpha=dpace_alpha,
+            sample_from_anchor=sample_from_anchor,
+        )
     loss = unary_loss + selector_loss_alpha * selector_loss
 
     one = torch.ones((), device=unary_logits.device)
@@ -160,6 +200,12 @@ def compute_metrics(
     metrics["selector_loss_total"] = one.clone()
     metrics["loss_sum"] = loss.detach().clone()
     metrics["loss_total"] = one.clone()
+    if dpard_acceptance is not None and dpard_credit is not None:
+        valid_float = loss_mask.to(dpard_acceptance.dtype)
+        metrics["dpard_acceptance_sum"] = (dpard_acceptance * valid_float).sum()
+        metrics["dpard_acceptance_total"] = valid_float.sum().clamp_min(1.0)
+        metrics["dpard_credit_sum"] = (dpard_credit * valid_float).sum()
+        metrics["dpard_credit_total"] = valid_float.sum().clamp_min(1.0)
 
     with torch.no_grad():
         target_ids = targets.argmax(dim=-1)

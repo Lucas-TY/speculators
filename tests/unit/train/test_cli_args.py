@@ -7,6 +7,7 @@ import pytest
 from speculators import losses
 from speculators.losses import eager
 from speculators.models.dflash.core import DFlashDraftModel
+from speculators.models.dflash2.core import DFlash2DraftModel
 from speculators.models.dspark.core import DSparkDraftModel
 from speculators.models.eagle3.core import Eagle3DraftModel
 from speculators.models.peagle.core import PEagleDraftModel
@@ -116,6 +117,80 @@ def test_dspark_explicit_eager(monkeypatch):
     assert train_kw["loss_config"]["kl_div"][0] is eager.kl_div_loss
     assert train_kw["tv_loss_fn"] is eager.tv_loss
     assert val_kw["tv_loss_fn"] is eager.tv_loss
+
+
+def test_dflash2_resolves_eager_renyi_half(monkeypatch):
+    args = _parse(
+        monkeypatch,
+        [
+            "--speculator-type",
+            "dflash2",
+            "--loss-implementation",
+            "eager",
+            "--loss-fn",
+            "renyi_half",
+        ],
+    )
+    train_kw, _ = DFlash2DraftModel.get_trainer_kwargs(**vars(args))
+    assert train_kw["loss_config"]["renyi_half"][0] is eager.renyi_half_loss
+
+
+def test_dflash2_dpard_cli_contract(monkeypatch):
+    args = _parse(
+        monkeypatch,
+        [
+            "--speculator-type",
+            "dflash2",
+            "--loss-fn",
+            "renyi_half",
+            "--per-position-loss-weight",
+            "dpard",
+            "--dpard-alpha",
+            "0.5",
+        ],
+    )
+    train_kw, val_kw = DFlash2DraftModel.get_trainer_kwargs(**vars(args))
+    assert train_kw["per_position_loss_weight"] == "dpard"
+    assert train_kw["dpard_alpha"] == 0.5
+    assert val_kw["per_position_loss_weight"] == "dpard"
+    assert val_kw["dpard_alpha"] == 0.5
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        [
+            "--speculator-type",
+            "dspark",
+            "--loss-fn",
+            "renyi_half",
+            "--per-position-loss-weight",
+            "dpard",
+        ],
+        [
+            "--speculator-type",
+            "dflash2",
+            "--loss-fn",
+            "kl_div",
+            "--per-position-loss-weight",
+            "dpard",
+        ],
+        [
+            "--speculator-type",
+            "dflash2",
+            "--loss-fn",
+            "renyi_half",
+            "--per-position-loss-weight",
+            "dpard",
+            "--dpard-alpha",
+            "1.0",
+        ],
+    ],
+)
+def test_dpard_cli_rejects_invalid_combinations(monkeypatch, extra):
+    with pytest.raises(SystemExit) as exc_info:
+        _parse(monkeypatch, extra)
+    assert exc_info.value.code == 2
 
 
 def test_dspark_compound_loss(monkeypatch):

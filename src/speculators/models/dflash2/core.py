@@ -111,6 +111,7 @@ class DFlash2DraftModel(DFlashDraftModel):
                 "per_position_loss_weight", "fixed-exp-decay"
             ),
             "dpace_alpha": kwargs.get("dpace_alpha", 0.5),
+            "dpard_alpha": kwargs.get("dpard_alpha", 0.5),
             "selector_loss_alpha": kwargs.get("selector_loss_alpha", 1.0),
         }
         return dict(shared), dict(shared)
@@ -144,6 +145,7 @@ class DFlash2DraftModel(DFlashDraftModel):
         selector_loss_alpha: float = 1.0,
         per_position_loss_weight: str = "fixed-exp-decay",
         dpace_alpha: float = 0.5,
+        dpard_alpha: float = 0.5,
         **kwargs,
     ) -> tuple[None, torch.Tensor, dict[str, Any]]:
         hidden, unary_logits, targets, aligned_loss_mask, block_indices = (
@@ -173,6 +175,14 @@ class DFlash2DraftModel(DFlashDraftModel):
             predecessor_ids.reshape(1, -1),
             training_candidate_ids,
         )
+        runtime_candidate_logits = None
+        if per_position_loss_weight == "dpard":
+            runtime_candidate_logits = self.candidate_selector.score_candidates(
+                unary_logits,
+                hidden,
+                predecessor_ids.reshape(1, -1),
+                candidate_ids,
+            )
 
         loss, metrics = compute_metrics(
             unary_logits=unary_logits,
@@ -191,5 +201,8 @@ class DFlash2DraftModel(DFlashDraftModel):
             selector_loss_alpha=selector_loss_alpha,
             per_position_loss_weight=per_position_loss_weight,
             dpace_alpha=dpace_alpha,
+            dpard_alpha=dpard_alpha,
+            runtime_candidate_ids=candidate_ids,
+            runtime_candidate_logits=runtime_candidate_logits,
         )
         return None, loss, metrics
