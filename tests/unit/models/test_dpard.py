@@ -109,7 +109,7 @@ def test_dpard_credit_rejects_invalid_shape_and_alpha() -> None:
         dpard_loss_decay(acceptance, mask, block_size=4, dpard_alpha=1.0)
 
 
-def test_dpard_metrics_match_literal_valid_block_actor() -> None:
+def test_dpard_metrics_match_literal_valid_position_actor() -> None:
     torch.manual_seed(11)
     logits = torch.randn(1, 6, 7)
     targets = torch.randn(1, 6, 7)
@@ -131,8 +131,7 @@ def test_dpard_metrics_match_literal_valid_block_actor() -> None:
     actor = renyi_half_loss(logits, targets)
     acceptance = 1.0 - tv_loss(logits, targets)
     credit = dpard_loss_decay(acceptance, mask, 3, 0.5)
-    valid_blocks = mask.view(-1, 3).any(dim=-1).sum()
-    expected = (actor * credit * mask).sum() / valid_blocks
+    expected = (actor * credit * mask).sum() / mask.sum()
     torch.testing.assert_close(loss, expected)
     torch.testing.assert_close(metrics["dpard_credit_sum"], credit.sum())
     torch.testing.assert_close(metrics["dpard_credit_total"], mask.sum())
@@ -148,7 +147,7 @@ def test_dpard_metrics_match_literal_valid_block_actor() -> None:
         )
 
 
-def test_dpard_confidence_uses_cumulative_reach_and_valid_block_mean() -> None:
+def test_dpard_confidence_uses_cumulative_reach_and_valid_position_mean() -> None:
     torch.manual_seed(13)
     logits = torch.randn(1, 6, 7)
     targets = torch.randn(1, 6, 7)
@@ -189,8 +188,54 @@ def test_dpard_confidence_uses_cumulative_reach_and_valid_block_mean() -> None:
     reach = torch.ones_like(acceptance_blocks)
     reach[:, 1:] = torch.cumprod(acceptance_blocks[:, :-1], dim=-1)
     reach = reach.view_as(mask) * mask
-    valid_blocks = mask.view(-1, 3).any(dim=-1).sum()
-    expected_confidence = (bce * reach).sum() / valid_blocks
+    expected_confidence = (bce * reach).sum() / mask.sum()
+    torch.testing.assert_close(total_loss - actor_loss, expected_confidence)
+
+
+def test_dpace_confidence_uses_q_star_reach_and_valid_position_mean() -> None:
+    torch.manual_seed(17)
+    logits = torch.randn(1, 6, 7)
+    targets = torch.randn(1, 6, 7)
+    mask = torch.tensor([[1, 1, 0, 1, 1, 1]], dtype=torch.float32)
+    confidence_logits = torch.zeros(1, 6)
+    loss_config = resolve_loss_config("ce", "eager")
+
+    actor_loss, _ = compute_metrics(
+        logits,
+        targets,
+        None,
+        mask,
+        3,
+        loss_config,
+        tv_loss_fn=tv_loss,
+        per_position_loss_weight="dpace",
+        dpace_alpha=0.5,
+    )
+    total_loss, _ = compute_metrics(
+        logits,
+        targets,
+        confidence_logits,
+        mask,
+        3,
+        loss_config,
+        tv_loss_fn=tv_loss,
+        per_position_loss_weight="dpace",
+        dpace_alpha=0.5,
+    )
+
+    acceptance = (1.0 - tv_loss(logits, targets)).detach()
+    bce = binary_cross_entropy_with_logits(
+        confidence_logits, acceptance, reduction="none"
+    )
+    target_ids = targets.argmax(dim=-1, keepdim=True)
+    q_star = logits.softmax(dim=-1).gather(-1, target_ids).squeeze(-1)
+    q_blocks = q_star.view(-1, 3)
+    mask_blocks = mask.view(-1, 3)
+    masked_q = torch.where(mask_blocks > 0, q_blocks, torch.ones_like(q_blocks))
+    reach = torch.ones_like(masked_q)
+    reach[:, 1:] = torch.cumprod(masked_q[:, :-1], dim=-1)
+    reach = reach.view_as(mask) * mask
+    expected_confidence = (bce * reach).sum() / mask.sum()
     torch.testing.assert_close(total_loss - actor_loss, expected_confidence)
 
 
@@ -222,6 +267,6 @@ def test_b16_actor_gradient_has_no_acceptance_credit_gradient() -> None:
                 weight[0, start : end + 1] += prefix
         tilted = (p * q).sqrt()
         tilted = tilted / tilted.sum(-1, keepdim=True)
-        expected_grad = (q - tilted) * weight.unsqueeze(-1) / 2.0
+        expected_grad = (q - tilted) * weight.unsqueeze(-1) / mask.sum()
     actual_grad = torch.autograd.grad(loss, logits)[0]
     torch.testing.assert_close(actual_grad, expected_grad)

@@ -19,6 +19,7 @@ from speculators.losses import (
     dflash_loss_decay,
     dpace_loss_decay,
     dpard_loss_decay,
+    masked_weighted_mean,
     tv_loss,
 )
 from speculators.models.metrics import compute_accuracy_multi_step
@@ -47,20 +48,29 @@ def _masked_decayed_mean(
     return (weighted.sum(dim=1) / denominator).mean()
 
 
-def _masked_weighted_block_mean(
-    elementwise: torch.Tensor,
-    position_weight: torch.Tensor,
+def _cumulative_reach(
+    probability: torch.Tensor,
     loss_mask: torch.Tensor,
     block_size: int,
+    start_pos: int,
 ) -> torch.Tensor:
-    """Average a weighted loss over valid speculative blocks."""
-    mask = loss_mask.to(elementwise.dtype)
-    numerator = (elementwise * position_weight * mask).sum()
-    valid_blocks = mask.reshape(-1, block_size).any(dim=-1).sum().clamp_min(1)
-    return numerator / valid_blocks
+    probability_blocks = probability.detach().float().reshape(-1, block_size)
+    mask_blocks = loss_mask.detach().float().reshape(-1, block_size)
+    active = mask_blocks[:, start_pos:]
+    masked_probability = torch.where(
+        active > 0,
+        probability_blocks[:, start_pos:],
+        torch.ones_like(active),
+    )
+    reach = torch.ones_like(masked_probability)
+    if masked_probability.shape[-1] > 1:
+        reach[:, 1:] = torch.cumprod(masked_probability[:, :-1], dim=-1)
+    output = torch.zeros_like(probability_blocks)
+    output[:, start_pos:] = reach * active
+    return output.reshape_as(loss_mask)
 
 
-def compute_metrics(
+def compute_metrics(  # noqa: C901
     logits: torch.Tensor,  # [1, T, draft_vocab_size] (Markov-corrected)
     targets: torch.Tensor,  # [1, T, draft_vocab_size]
     confidence_logits: torch.Tensor | None,  # [1, T] or None
@@ -105,6 +115,20 @@ def compute_metrics(
         decay_fn=decay_fn,
     )
     dpard_credit = None
+    if per_position_loss_weight == "dpace":
+        with torch.no_grad():
+            target_ids = targets.argmax(dim=-1, keepdim=True)
+            q_star = (
+                torch.softmax(logits.float(), dim=-1).gather(-1, target_ids).squeeze(-1)
+            )
+            confidence_weight = _cumulative_reach(
+                q_star, loss_mask, block_size, start_pos
+            )
+        confidence_loss_fn = partial(
+            masked_weighted_mean,
+            position_weight=confidence_weight,
+            loss_mask=loss_mask,
+        )
     if per_position_loss_weight == "dpard":
         if set(loss_config) != {"renyi_half"}:
             raise ValueError("D-PARD requires exactly loss_fn=renyi_half")
@@ -119,37 +143,20 @@ def compute_metrics(
             dpard_alpha,
             start_pos=start_pos,
         )
-        loss = _masked_weighted_block_mean(
+        loss = masked_weighted_mean(
             actor_local,
             dpard_credit.detach(),
             loss_mask,
-            block_size,
         )
         term_losses: dict[str, torch.Tensor] = {}
         with torch.no_grad():
-            acceptance_blocks = accept_rate.view(-1, block_size)
-            mask_blocks = loss_mask.to(accept_rate.dtype).view(-1, block_size)
-            active = mask_blocks[:, start_pos:]
-            masked_acceptance = torch.where(
-                active > 0,
-                acceptance_blocks[:, start_pos:],
-                torch.ones_like(active),
+            confidence_weight = _cumulative_reach(
+                accept_rate, loss_mask, block_size, start_pos
             )
-            reach = torch.cat(
-                [
-                    torch.ones_like(masked_acceptance[:, :1]),
-                    torch.cumprod(masked_acceptance, dim=-1)[:, :-1],
-                ],
-                dim=-1,
-            )
-            reach_blocks = torch.zeros_like(acceptance_blocks)
-            reach_blocks[:, start_pos:] = reach * active
-            confidence_weight = reach_blocks.reshape_as(loss_mask)
         confidence_loss_fn = partial(
-            _masked_weighted_block_mean,
+            masked_weighted_mean,
             position_weight=confidence_weight,
             loss_mask=loss_mask,
-            block_size=block_size,
         )
     else:
         loss, term_losses = compound_loss(
