@@ -28,7 +28,7 @@ def test_dpard_example_resolves_native_b16_config(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     argv = result.stdout.splitlines()
-    cfg = TrainConfig.resolve(argv[argv.index("scripts/train.py") + 1 :])
+    cfg = TrainConfig.resolve(argv[argv.index("speculators.train") + 1 :])
     assert cfg.speculator_type == "dspark"
     assert cfg.data.data_path == str(data)
     assert cfg.trainer.save_path == str(output)

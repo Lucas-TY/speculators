@@ -35,7 +35,7 @@ D-PARD combines a Rényi-half actor with detached, acceptance-derived position c
 
 For target distribution `p_t` and draft distribution `q_t`, the actor is `D_t = -2 log sum_v sqrt(p_t,v q_t,v)`. Position acceptance is `a_t = sum_v min(p_t,v, q_t,v)` and smoothing is `s_t = alpha + (1-alpha) a_t`, where `alpha` is `--dpard-alpha`. D-PARD uses the detached suffix credit `W_t = sum_{k=t}^D product_{i=1}^k s_i`.
 
-The actor loss is `sum_t W_t D_t / valid_block_count`. The confidence head predicts `a_t`; its BCE uses the detached cumulative-reach weight `r_t = product_{i<t} a_i` and the same valid-block denominator. The actor and confidence weights are dynamic, while the confidence target and both position weights remain detached.
+The actor loss is `sum_t W_t D_t / valid_position_count`. The confidence head predicts `a_t`; its BCE uses the detached cumulative-reach weight `r_t = product_{i<t} a_i` and the same valid-position denominator. The actor and confidence weights are dynamic, while the confidence target and both position weights remain detached.
 
 For the Qwen3-4B B16 native offline recipe, run from the repository root:
 
@@ -44,9 +44,9 @@ DATA_PATH=/path/to/native_dataset \
   bash examples/train/dspark_qwen3_4b_dpard_offline.sh
 ```
 
-The [example](../../../examples/train/dspark_qwen3_4b_dpard_offline.sh) trains three draft layers with B16, 512 anchors per packed sequence, seed 42, and alpha 0.5. It requires cached native hidden states for target layers `[1, 17, 33]` and the verifier's final hidden states. Set `OUTPUT_DIR` and `NUM_TRAIN_GPUS` to change the output path and GPU count (default: two).
+The [example](../../../examples/train/dspark_qwen3_4b_dpard_offline.sh) trains three draft layers with B16, 512 anchors per packed sequence, seed 42, and alpha 0.5. It requires cached native hidden states for target layers `[1, 17, 33]` and the verifier's final hidden states. Set `OUTPUT_DIR` and `NUM_TRAIN_GPUS` to change the output path and GPU count (default: four).
 
-Training uses 8192-token packing, uniform hidden-state noise in `[-0.05, 0.05]`, causal sliding attention (window 2048), AdamW (weight decay 0.01), and linear LR decay over six epochs. The split reserves one validation row from 36,624; adjust it for other datasets. For a static Rényi control, change `--per-position-loss-weight dpard` to `--per-position-loss-weight fixed-exp-decay` and keep the other settings unchanged.
+Training uses 8192-token packing, uniform hidden-state noise in `[-0.05, 0.05]`, causal sliding attention (window 2048), AdamW (weight decay 0.01), and linear LR decay over six epochs. `TRAIN_DATA_RATIO` defaults to holding out one of 99,072 samples and can be overridden for your dataset. For a static Rényi control, change `--per-position-loss-weight dpard` to `--per-position-loss-weight fixed-exp-decay` and keep the other settings unchanged.
 
 ## Key Parameters
 

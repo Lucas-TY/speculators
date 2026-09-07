@@ -9,10 +9,11 @@ set -euo pipefail
 
 : "${DATA_PATH:?Set DATA_PATH to the native Speculators dataset directory}"
 OUTPUT_DIR=${OUTPUT_DIR:-./output/dspark_qwen3_4b_dpard_b16}
-NUM_TRAIN_GPUS=${NUM_TRAIN_GPUS:-2}
+NUM_TRAIN_GPUS=${NUM_TRAIN_GPUS:-4}
+# This split holds out one of 99,072 samples; override for another dataset size.
+TRAIN_DATA_RATIO=${TRAIN_DATA_RATIO:-0.9999899063307494}
 
-# This split reserves one validation row from 36,624; adjust for other datasets.
-torchrun --standalone --nproc_per_node "$NUM_TRAIN_GPUS" scripts/train.py \
+torchrun --standalone --nproc_per_node "$NUM_TRAIN_GPUS" -m speculators.train \
     --verifier-name-or-path Qwen/Qwen3-4B \
     --data-path "$DATA_PATH" \
     --save-path "$OUTPUT_DIR" \
@@ -26,7 +27,7 @@ torchrun --standalone --nproc_per_node "$NUM_TRAIN_GPUS" scripts/train.py \
     --sliding-window 2048 \
     --no-sliding-window-non-causal \
     --total-seq-len 8192 \
-    --train-data-ratio 0.9999726955002184 \
+    --train-data-ratio "$TRAIN_DATA_RATIO" \
     --noise-std 0.05 \
     --hidden-states-dtype bfloat16 \
     --num-workers 8 \
