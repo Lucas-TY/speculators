@@ -68,6 +68,8 @@ All [DFlash](dflash.md) backbone parameters also apply. DFlash2 defaults to five
 
 To train your own, see `examples/train/dflash2_qwen3_8b_ultrachat_online_5k.sh`. For a compact Qwen3-4B D-PARD command, see `examples/train/dflash2_qwen3_4b_dpard.sh`.
 
+For offline Qwen3-4B D-PARD training with block size 16, three draft layers, and six epochs, use `examples/train/dflash2_qwen3_4b_b16_dpard_offline.sh`. Set `DATA_PATH` to a prepared Speculators dataset with cached hidden states for target layers `[1, 17, 33]`. Missing caches raise an error; no vLLM endpoint is needed. `NUM_TRAIN_GPUS` defaults to 4. `TRAIN_DATA_RATIO` defaults to holding out one of 99,072 samples and can be overridden for your dataset.
+
 ## Serving
 
 Checkpoints emitted here follow the public Z Lab weight contract but use a speculators config. They can be served in vLLM using `vllm serve ./checkpoint`.
