@@ -177,12 +177,13 @@ class DFlash2DraftModel(DFlashDraftModel):
         )
         runtime_candidate_logits = None
         if per_position_loss_weight == "dpard":
-            runtime_candidate_logits = self.candidate_selector.score_candidates(
-                unary_logits,
-                hidden,
-                predecessor_ids.reshape(1, -1),
-                candidate_ids,
-            )
+            with torch.no_grad():
+                runtime_candidate_logits = self.candidate_selector.score_candidates(
+                    unary_logits,
+                    hidden,
+                    predecessor_ids.reshape(1, -1),
+                    candidate_ids,
+                )
 
         loss, metrics = compute_metrics(
             unary_logits=unary_logits,
