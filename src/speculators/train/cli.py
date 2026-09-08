@@ -707,6 +707,7 @@ def main(cfg: TrainConfig):  # noqa: C901
         log_freq=args.log_freq,
         fsdp_shard=args.fsdp_shard,
         max_steps=args.max_steps,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
     )
     trainer = Trainer(draft_model, trainer_config, train_loader, val_loader)
 

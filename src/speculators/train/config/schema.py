@@ -391,6 +391,9 @@ class SchedulerArgs(_Group):
 
 
 class TrainerArgs(_Group):
+    gradient_accumulation_steps: int = Field(
+        default=1, ge=1, description="Microbatches per optimizer update."
+    )
     epochs: int = Field(default=20, description="Number of training epochs.")
     checkpoint_freq: float = Field(
         default=1.0,

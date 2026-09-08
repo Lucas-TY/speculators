@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import time
 import warnings
 from pathlib import Path
@@ -139,6 +140,7 @@ class TrainerConfig(NamedTuple):
     log_freq: int = 1
     fsdp_shard: bool = False
     max_steps: int | None = None
+    gradient_accumulation_steps: int = 1
 
 
 def _resolve_scheduler_steps(
@@ -150,9 +152,13 @@ def _resolve_scheduler_steps(
     Explicit ``scheduler_warmup_steps`` wins; otherwise ``scheduler_warmup_ratio``
     (a fraction of total steps, validated to ``[0, 1]``) is used; otherwise the
     default of 1% of the resolved total steps. ``scheduler_total_steps`` defaults
-    to ``num_epochs * train_loader_len``.
+    to ``num_epochs * ceil(train_loader_len / gradient_accumulation_steps)``.
     """
-    default_total_steps = config.num_epochs * train_loader_len
+    if config.gradient_accumulation_steps < 1:
+        raise ValueError("gradient_accumulation_steps must be positive")
+    default_total_steps = config.num_epochs * math.ceil(
+        train_loader_len / config.gradient_accumulation_steps
+    )
     scheduler_total_steps = (
         config.scheduler_total_steps
         if config.scheduler_total_steps is not None
@@ -218,6 +224,10 @@ class Trainer:
                 "local_step": local_step,
                 "global_step": self.global_step,
             }
+            if self.config.gradient_accumulation_steps != 1:
+                state["gradient_accumulation_steps"] = (
+                    self.config.gradient_accumulation_steps
+                )
             p = self._training_state_path(epoch)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(json.dumps(state))
@@ -242,6 +252,13 @@ class Trainer:
                 # Check if this was a mid-epoch checkpoint — if so, resume
                 # from within that epoch rather than jumping to the next one.
                 state = self._load_training_state()
+                if (
+                    state.get("gradient_accumulation_steps", 1)
+                    != self.config.gradient_accumulation_steps
+                ):
+                    raise ValueError(
+                        "Resume requires the same gradient_accumulation_steps"
+                    )
                 is_mid_epoch = (
                     state
                     and state.get("epoch") == self.checkpointer.previous_epoch
@@ -437,13 +454,16 @@ class Trainer:
             )
         return skip_steps
 
-    def train_epoch(self, epoch: int):
+    def train_epoch(self, epoch: int):  # noqa: C901 - keep update boundaries in one loop
         self.model.train()
         if hasattr(self.train_loader.batch_sampler, "set_epoch"):
             self.train_loader.batch_sampler.set_epoch(epoch)  # type: ignore[union-attr]
 
         # Capture full-epoch step count before any resume fast-skip mutation.
         num_steps = len(self.train_loader)
+        accumulation = self.config.gradient_accumulation_steps
+        if accumulation < 1:
+            raise ValueError("gradient_accumulation_steps must be positive")
 
         # Determine how many batches to skip for mid-epoch resume.
         skip_steps = self._prepare_resume_skip(epoch)
@@ -453,7 +473,12 @@ class Trainer:
             train_loader = tqdm(train_loader, desc=f"Epoch {epoch}")  # type: ignore[assignment]
 
         step_interval = (
-            max(1, round(num_steps * self.config.checkpoint_freq))
+            max(
+                1,
+                round(
+                    math.ceil(num_steps / accumulation) * self.config.checkpoint_freq
+                ),
+            )
             if self.config.checkpoint_freq < 1
             else None
         )
@@ -464,11 +489,21 @@ class Trainer:
         for local_step_rel, batch in enumerate(train_loader, 1):
             # local_step is 1-based index into the *full* epoch (not the slice).
             local_step = local_step_rel + skip_steps
+            if (local_step_rel - 1) % accumulation == 0:
+                group_size = min(accumulation, remaining_steps - local_step_rel + 1)
+                self._optimizers_zero_grad()
+                pending_metrics = {}
+                pending_profile = {}
+                pending_tokens = 0
+            update = (
+                local_step_rel % accumulation == 0 or local_step_rel == remaining_steps
+            )
             timer.reset(self.global_step % self.config.log_freq == 0)
 
             timer.mark_value("start", t_before_fetch)
             will_stop = (
-                self.config.max_steps is not None
+                update
+                and self.config.max_steps is not None
                 and self.global_step + 1 >= self.config.max_steps
             )
             recovery.consume(
@@ -495,9 +530,9 @@ class Trainer:
                 )
 
             timer.mark("fwd")
-            self._optimizers_zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            (loss / group_size).backward()
+            if update:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
             metrics["error_records_sum"] = torch.tensor(
                 batch["error_records"], dtype=torch.int32, device=loss.device
@@ -507,12 +542,14 @@ class Trainer:
             )
 
             timer.mark("bwd")
-            self._optimizers_step()
+            if update:
+                self._optimizers_step()
 
             current_lrs = {
                 type(opt).__name__: opt.param_groups[0]["lr"] for opt in self.optimizers
             }
-            self._schedulers_step()
+            if update:
+                self._schedulers_step()
             timer.mark("opt")
             t_before_fetch = timer.now() or time.perf_counter()
 
@@ -520,6 +557,23 @@ class Trainer:
             if timer.enabled:
                 num_tokens = int((gpu_batch["document_ids"] != -1).sum().item())
                 profile = timer.profile(num_tokens)
+                pending_tokens += num_tokens
+                for key, value in metrics.items():
+                    pending_metrics[key] = pending_metrics.get(key, 0) + value.detach()
+                for key, value in profile.items():
+                    pending_profile[key] = pending_profile.get(key, 0) + value
+            if not update:
+                continue
+            if timer.enabled:
+                metrics = pending_metrics
+                profile = pending_profile
+                step_ms = profile["step_ms"]
+                profile["tokens_per_s"] = (
+                    pending_tokens * 1000 / step_ms if step_ms > 0 else 0.0
+                )
+                profile["fetch_frac"] = (
+                    profile["fetch_ms"] / step_ms if step_ms > 0 else 0.0
+                )
                 if self.is_distributed:
                     for v in metrics.values():
                         dist.reduce(v, dst=0, op=dist.ReduceOp.SUM)
@@ -553,8 +607,9 @@ class Trainer:
             if (
                 step_interval is not None
                 and not self.config.save_best
-                and local_step % step_interval == 0
-                and num_steps - local_step >= step_interval * MIN_STEP_PCT
+                and math.ceil(local_step / accumulation) % step_interval == 0
+                and num_steps - local_step
+                >= step_interval * accumulation * MIN_STEP_PCT
                 # Avoid saving back to back ay the end of each epoch
             ):
                 self.maybe_save_checkpoint(epoch, local_step=local_step)
