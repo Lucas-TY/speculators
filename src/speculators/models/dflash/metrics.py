@@ -80,6 +80,7 @@ def compute_metrics(  # noqa: C901 - keep the two unary objectives and shared me
             dpard_alpha,
             start_pos=0 if sample_from_anchor else 1,
         )
+
         def decay_fn(_pos, **_kwargs):
             return credit
     elif per_position_loss_weight == "dpace":

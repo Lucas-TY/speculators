@@ -375,6 +375,7 @@ def _warn_mismatched_algorithm_blocks(cfg: TrainConfig, provided: set[str]) -> N
             _dest_to_flag(dest)
             for dest in _GROUPS[group].model_fields
             if dest in provided
+            and not (cfg.speculator_type == "dflash" and dest == "dpard_alpha")
         )
         if ignored:
             warnings.warn(

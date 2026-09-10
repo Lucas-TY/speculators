@@ -29,6 +29,17 @@ The sampling mode affects both training (which targets are used and which slots 
 
 **Training:** Use the `--sample-from-anchor` / `--no-sample-from-anchor` flags to override the algorithm-specific default.
 
+## D-PARD training
+
+D-PARD uses Rényi-half divergence and detached position weights computed from full-vocabulary target–draft overlap (`1 - TV`). For an offline Qwen3-4B example:
+
+```bash
+DATA_PATH=/path/to/prepared/dataset \
+  bash examples/train/dflash_qwen3_4b_b16_dpard_offline.sh
+```
+
+The example uses block size 16, three draft layers, and two GPUs with two gradient-accumulation steps (global batch size 4). It averages each sequence's weighted loss over its valid anchors, then averages over nonempty sequences. No selector or confidence head is used. `DATA_PATH` must contain a prepared Speculators dataset with cached target hidden states. Override `TARGET_MODEL` to use a local Qwen3-4B checkpoint and `OUTPUT_DIR` to choose the output path.
+
 ## Pretrained Models
 
 Pretrained DFlash speculator models are available on HuggingFace from the [RedHatAI speculator models collection](https://huggingface.co/collections/RedHatAI/speculator-models):
