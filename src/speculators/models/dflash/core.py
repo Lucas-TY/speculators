@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Callable
 from typing import ClassVar
 
 import torch
@@ -10,7 +11,7 @@ from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3RotaryEmbedding,
 )
 
-from speculators.losses import LossConfig, resolve_loss_config
+from speculators.losses import LossConfig, resolve_loss_config, tv_loss
 from speculators.model import DraftVocabMixin, SpeculatorModel
 from speculators.models.attention import create_float_mask
 from speculators.models.dflash import DFlashSpeculatorConfig
@@ -299,6 +300,15 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             "per_position_loss_weight": per_position_loss_weight,
             "dpace_alpha": dpace_alpha,
         }
+        # Subclasses have their own objective; retain their existing trainer kwargs.
+        if kwargs.get("speculator_type", "dflash") == "dflash":
+            shared.update(
+                dpard_alpha=kwargs.get("dpard_alpha", 0.5),
+                dflash_loss_reduction=kwargs.get("dflash_loss_reduction", "token-mean"),
+                tv_loss_fn=resolve_loss_config(
+                    "tv", kwargs.get("loss_implementation", "fused")
+                )["tv"][0],
+            )
         return dict(shared), dict(shared)
 
     @property
@@ -494,6 +504,9 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         max_anchors: int = 512,
         per_position_loss_weight: str = "fixed-exp-decay",
         dpace_alpha: float = 0.5,
+        dpard_alpha: float = 0.5,
+        dflash_loss_reduction: str = "token-mean",
+        tv_loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = tv_loss,
         **kwargs,
     ):
         _, logits, targets, aligned_loss_mask, _ = self._backbone_forward(
@@ -516,5 +529,8 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             per_position_loss_weight=per_position_loss_weight,
             dpace_alpha=dpace_alpha,
             sample_from_anchor=self.config.sample_from_anchor,
+            dpard_alpha=dpard_alpha,
+            dflash_loss_reduction=dflash_loss_reduction,
+            tv_loss_fn=tv_loss_fn,
         )
         return None, loss, metrics

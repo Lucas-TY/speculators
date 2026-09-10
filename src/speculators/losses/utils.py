@@ -91,9 +91,8 @@ def dpace_loss_decay(
                 f"q.shape[1] ({q.shape[1]}) must be divisible by "
                 f"block_size ({block_size})"
             )
-        num_anchors = q.shape[1] // block_size
-        q = q.reshape(num_anchors, block_size)
-        mask = loss_mask.reshape(num_anchors, block_size).to(q.dtype)
+        q = q.reshape(-1, block_size)
+        mask = loss_mask.reshape(-1, block_size).to(q.dtype)
 
         # smoothed confidence for numerical stability
         smooth = (1.0 - dpace_alpha) * q + dpace_alpha
@@ -109,7 +108,7 @@ def dpace_loss_decay(
         weight = weight * mask
 
     # reshape weight
-    return weight.reshape(1, -1)
+    return weight.reshape_as(elementwise_loss)
 
 
 def dpard_loss_decay(
@@ -149,6 +148,7 @@ def masked_weighted_mean(
     elementwise_loss: torch.Tensor,
     position_weight: torch.Tensor,
     loss_mask: torch.Tensor,
+    reduction_block_size: int | None = None,
 ) -> torch.Tensor:
     """Average a position-weighted loss by valid positions, then by batch."""
     if (
@@ -160,6 +160,16 @@ def masked_weighted_mean(
         )
     mask = loss_mask.to(elementwise_loss.dtype)
     numerator = (elementwise_loss * position_weight * mask).sum(dim=1)
+    if reduction_block_size is not None:
+        if reduction_block_size < 1 or mask.shape[1] % reduction_block_size:
+            raise ValueError("sequence length must be divisible by positive block size")
+        # Each native packed row contributes equally, irrespective of anchor count.
+        anchors = (mask.reshape(mask.shape[0], -1, reduction_block_size) > 0).any(-1)
+        denominator = anchors.sum(dim=1)
+        active = denominator > 0
+        return (
+            (numerator / denominator.clamp_min(1)) * active
+        ).sum() / active.sum().clamp_min(1)
     denominator = mask.sum(dim=1) + _LOSS_REDUCTION_EPS
     return (numerator / denominator).mean()
 
@@ -295,6 +305,7 @@ def compound_loss(
     pos_idx: torch.Tensor,
     loss_config: LossConfig,
     decay_fn: Callable[..., torch.Tensor] | None = None,
+    reduction_block_size: int | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute a weighted sum of loss terms.
 
@@ -317,6 +328,7 @@ def compound_loss(
             pos_idx,
             loss_fn=fn,
             decay_fn=decay_fn,
+            reduction_block_size=reduction_block_size,
         )
         if multi:
             term_losses[f"{name}_loss"] = term.detach()
@@ -331,6 +343,7 @@ def loss_function(
     pos_idx: torch.Tensor,  # shape: [1, seq_len]
     loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = kl_div_loss,
     decay_fn: Callable[..., torch.Tensor] | None = None,
+    reduction_block_size: int | None = None,
 ):
     """Compute masked, optionally position-decayed training loss.
 
@@ -355,4 +368,6 @@ def loss_function(
         position_weight = decay_fn(
             pos_idx.to(elementwise_loss.dtype), elementwise_loss=masked_loss
         )
-    return masked_weighted_mean(elementwise_loss, position_weight, loss_mask)
+    return masked_weighted_mean(
+        elementwise_loss, position_weight, loss_mask, reduction_block_size
+    )

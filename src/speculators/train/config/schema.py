@@ -479,6 +479,11 @@ class DFlashArgs(_Group):
         description="Smoothing constant for the D-PACE loss (default: 0.5). Must be in "
         "(0, 1] when --per-position-loss-weight=dpace.",
     )
+    dflash_loss_reduction: Literal["token-mean", "sequence-mean-valid-anchor"] = Field(
+        default="token-mean",
+        description="DFlash1 loss denominator: valid tokens (legacy) or valid "
+        "anchors per native packed sequence, averaged over nonempty sequences.",
+    )
 
 
 class DFlash2Args(_Group):
@@ -755,8 +760,8 @@ class TrainConfig(BaseSettings):
                     f"--dpace-alpha must be in (0, 1], got {self.dflash.dpace_alpha}"
                 )
         if self.dflash.per_position_loss_weight == "dpard":
-            if self.speculator_type != "dflash2":
-                raise ValueError("D-PARD position weighting requires DFlash2")
+            if self.speculator_type not in {"dflash", "dflash2"}:
+                raise ValueError("D-PARD position weighting requires DFlash or DFlash2")
             if self.loss.loss_fn != "renyi_half":
                 raise ValueError(
                     "--per-position-loss-weight=dpard requires --loss-fn=renyi_half"
@@ -765,6 +770,11 @@ class TrainConfig(BaseSettings):
                 raise ValueError(
                     f"--dpard-alpha must be in (0, 1), got {self.dflash2.dpard_alpha}"
                 )
+        if (
+            self.dflash.dflash_loss_reduction != "token-mean"
+            and self.speculator_type != "dflash"
+        ):
+            raise ValueError("Anchor loss reduction is supported only for DFlash1")
         return self
 
     def flatten(self) -> dict[str, Any]:

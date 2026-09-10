@@ -1,5 +1,6 @@
 """Metrics and loss functions for DFlash draft model."""
 
+from collections.abc import Callable
 from functools import partial
 from typing import Any
 
@@ -10,14 +11,16 @@ from speculators.losses import (
     compound_loss,
     dflash_loss_decay,
     dpace_loss_decay,
+    dpard_loss_decay,
     kl_div_loss,
+    tv_loss,
 )
 from speculators.models.metrics import compute_accuracy_multi_step
 
 _DEFAULT_LOSS_CONFIG: LossConfig = {"kl_div": (kl_div_loss, 1.0)}
 
 
-def compute_metrics(
+def compute_metrics(  # noqa: C901 - keep the two unary objectives and shared metrics together
     logits: torch.Tensor,  # shape: [1, num_anchors*block_size, draft_vocab_size]
     targets: torch.Tensor,  # shape: [1, num_anchors*block_size, draft_vocab_size]
     loss_mask: torch.Tensor,  # shape: [1, num_anchors*block_size]
@@ -27,6 +30,9 @@ def compute_metrics(
     per_position_loss_weight: str = "fixed-exp-decay",
     dpace_alpha: float = 0.5,
     sample_from_anchor: bool = False,
+    dpard_alpha: float = 0.5,
+    dflash_loss_reduction: str = "token-mean",
+    tv_loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = tv_loss,
 ) -> tuple[torch.Tensor, dict]:
     """Compute loss and accuracy metrics for draft model predictions.
 
@@ -49,11 +55,34 @@ def compute_metrics(
     """
     if loss_config is None:
         loss_config = _DEFAULT_LOSS_CONFIG
+    if dflash_loss_reduction not in {"token-mean", "sequence-mean-valid-anchor"}:
+        raise ValueError("Unknown DFlash loss reduction")
+    reduction_block_size = (
+        block_size if dflash_loss_reduction == "sequence-mean-valid-anchor" else None
+    )
     seq_len = logits.shape[1]
     pos_idx = torch.arange(seq_len, device=logits.device) % block_size
     pos_idx = pos_idx.unsqueeze(0)  # shape: [1, T]
 
-    if per_position_loss_weight == "dpace":
+    acceptance = None
+    if per_position_loss_weight == "dpard" or reduction_block_size is not None:
+        with torch.no_grad():
+            # Full-vocabulary unary overlap; never a selector or hard-target proxy.
+            acceptance = (1.0 - tv_loss_fn(logits, targets)).clamp(0.0, 1.0)
+
+    if per_position_loss_weight == "dpard":
+        if set(loss_config) != {"renyi_half"} or loss_config["renyi_half"][1] != 1.0:
+            raise ValueError("D-PARD requires exactly unit-weight loss_fn=renyi_half")
+        credit = dpard_loss_decay(
+            acceptance,
+            loss_mask,
+            block_size,
+            dpard_alpha,
+            start_pos=0 if sample_from_anchor else 1,
+        )
+        def decay_fn(_pos, **_kwargs):
+            return credit
+    elif per_position_loss_weight == "dpace":
         decay_fn = partial(
             dpace_loss_decay,
             loss_mask=loss_mask,
@@ -72,6 +101,7 @@ def compute_metrics(
         pos_idx,
         loss_config=loss_config,
         decay_fn=decay_fn,
+        reduction_block_size=reduction_block_size,
     )
 
     pred_ids = torch.argmax(logits, dim=-1)
@@ -105,4 +135,15 @@ def compute_metrics(
         eal = eal + cum
     metrics["eal_sum"] = eal
     metrics["eal_total"] = ones.clone()
+    if acceptance is not None:
+        with torch.no_grad():
+            active = loss_mask.reshape(-1, block_size)[:, start_pos:] > 0
+            block_valid = active.any(-1)
+            overlap = acceptance.reshape(-1, block_size)[:, start_pos:]
+            # Raw (unsmoothed) unary overlap proxy, including the bonus token.
+            tau = 1.0 + torch.cumprod(overlap * active, -1).sum(-1)
+            metrics["acceptance_sum"] = (acceptance * loss_mask).sum()
+            metrics["acceptance_total"] = loss_mask.sum()
+            metrics["tau_sum"] = (tau * block_valid).sum()
+            metrics["tau_total"] = block_valid.sum()
     return loss, metrics
